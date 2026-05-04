@@ -5,9 +5,11 @@ Mouse, keyboard, clipboard, audio — over TCP, written in Rust.
 
 ## Status
 
-Scaffolding — protocol, layout engine, GUI shell, and daemon plumbing
-are in place. OS-specific input capture/inject and audio streaming are
-the next milestones (see TODOs in `dshare-input/src/{windows,linux}.rs`).
+End-to-end mouse + keyboard works: capture from a Windows server,
+forward over TCP, inject into a Linux client through `uinput`.
+
+Still TODO: edge crossing (currently a hotkey toggle), Linux capture,
+clipboard wiring, audio.
 
 ## Layout
 
@@ -32,16 +34,39 @@ cargo run -p dshare -- gui
 Run the daemon with explicit role:
 
 ```bash
-# on Windows (cursor source)
+# on Windows (cursor source) — listens on 0.0.0.0:24800 by default
 cargo run -p dshare -- server
 
-# on Ubuntu (cursor sink)
+# on Ubuntu (cursor sink) — needs server_addr in config
 cargo run -p dshare -- client
 ```
 
 Config lives at:
 - Windows: `%APPDATA%\dshare\config.toml`
 - Linux: `~/.config/dshare/config.toml`
+
+Minimal Linux client config (`~/.config/dshare/config.toml`):
+
+```toml
+role = "client"
+bind_addr = "0.0.0.0:24800"
+server_addr = "<windows-host-ip>:24800"
+clipboard_sync = true
+
+[layout.server_screen]
+width = 1920
+height = 1080
+```
+
+## Using it
+
+1. Start `dshare client` on Ubuntu — it connects, exchanges Hello, then idles.
+2. Start `dshare server` on Windows — accepts the client.
+3. Press **Ctrl+Alt+Shift+G** on Windows to take over: mouse and keyboard
+   are now forwarded to Ubuntu and swallowed locally.
+4. Press the same hotkey again to release.
+
+The server log prints `dshare grab ON` / `OFF` on each toggle.
 
 ## Linux setup (uinput permissions)
 
@@ -75,10 +100,12 @@ straight to uinput.
 ## Roadmap
 
 1. ~~Fill in `LinuxInject` (uinput virtual device)~~ ✅
-2. Fill in `WinCapture` (low-level hooks + message pump on dedicated thread)
-3. Fill in `LinuxCapture` (evdev grab on `/dev/input/event*`)
-4. Wire capture → session → inject end to end with edge crossing
-5. Keycode normalization table (Win VK → evdev)
-6. TLS via `rustls` for the framed stream
-7. Audio streaming crate (`cpal` capture + Opus + UDP/RTP)
+2. ~~Fill in `WinCapture` (low-level hooks + message pump)~~ ✅
+3. ~~Keycode normalization (Win VK → evdev)~~ ✅
+4. ~~Wire capture → session → inject end to end (hotkey toggle)~~ ✅
+5. Edge crossing instead of hotkey (cursor jail + virtual position tracking)
+6. Fill in `LinuxCapture` (evdev grab on `/dev/input/event*`)
+7. Wire clipboard sync into `handle_peer`
+8. TLS via `rustls` for the framed stream
+9. Audio streaming crate (`cpal` capture + Opus + UDP/RTP)
 ```

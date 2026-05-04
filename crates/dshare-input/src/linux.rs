@@ -27,18 +27,22 @@ use evdev::{
     uinput::{VirtualDevice, VirtualDeviceBuilder},
     AttributeSet, EventType, InputEvent, Key, RelativeAxisType,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::{InputCapture, InputInject};
 
 pub struct LinuxCapture {
-    grabbed: bool,
+    grabbed: Arc<AtomicBool>,
 }
 
 impl LinuxCapture {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self { grabbed: false })
+        Ok(Self {
+            grabbed: Arc::new(AtomicBool::new(false)),
+        })
     }
 }
 
@@ -52,7 +56,11 @@ impl InputCapture for LinuxCapture {
     }
 
     fn set_grabbed(&mut self, grabbed: bool) {
-        self.grabbed = grabbed;
+        self.grabbed.store(grabbed, Ordering::SeqCst);
+    }
+
+    fn grabbed_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.grabbed)
     }
 }
 

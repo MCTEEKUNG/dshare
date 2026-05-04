@@ -12,8 +12,9 @@ use dshare_core::config::{Config, Role};
 use dshare_protocol::{
     codec::MessageCodec, Hello, KeyModifiers, Message, MouseButton, ScreenInfo, PROTOCOL_VERSION,
 };
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
@@ -217,8 +218,10 @@ async fn run_client(cfg: Config) -> anyhow::Result<()> {
 }
 
 async fn handle_peer(stream: TcpStream, cfg: Config, is_server: bool) -> anyhow::Result<()> {
+    let _ = stream.set_nodelay(true);
     let mut framed = Framed::new(stream, MessageCodec);
 
+    // ---- Hello exchange ---------------------------------------------------
     let hello = Hello {
         protocol_version: PROTOCOL_VERSION,
         peer_id: Uuid::new_v4(),
@@ -229,11 +232,110 @@ async fn handle_peer(stream: TcpStream, cfg: Config, is_server: bool) -> anyhow:
         },
     };
     framed.send(Message::Hello(hello)).await?;
-    info!("hello sent (role={})", if is_server { "server" } else { "client" });
 
-    // TODO: handshake → spawn capture (server) / inject (client) → spawn
-    // clipboard watcher → run main loop forwarding messages between
-    // local sources and the framed stream.
+    let peer_msg = tokio::time::timeout(Duration::from_secs(5), framed.next())
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout waiting for peer Hello"))?
+        .ok_or_else(|| anyhow::anyhow!("peer disconnected before Hello"))??;
+
+    let peer_hello = match peer_msg {
+        Message::Hello(h) => h,
+        other => anyhow::bail!("expected Hello, got {other:?}"),
+    };
+
+    if peer_hello.protocol_version != PROTOCOL_VERSION {
+        let _ = framed
+            .send(Message::HelloAck {
+                accepted: false,
+                reason: Some(format!(
+                    "version mismatch: peer={} ours={}",
+                    peer_hello.protocol_version, PROTOCOL_VERSION
+                )),
+            })
+            .await;
+        anyhow::bail!(
+            "protocol version mismatch (peer={} ours={})",
+            peer_hello.protocol_version,
+            PROTOCOL_VERSION
+        );
+    }
+    framed
+        .send(Message::HelloAck { accepted: true, reason: None })
+        .await?;
+
+    info!(
+        "peer ready: {} ({}x{})",
+        peer_hello.hostname, peer_hello.screen.width, peer_hello.screen.height
+    );
+
+    // ---- Split + role-specific loops -------------------------------------
+    let (mut sink, mut source) = framed.split();
+
+    if is_server {
+        let mut cap = dshare_input::default_capture()?;
+        let grabbed = cap.grabbed_handle();
+        let (cap_tx, mut cap_rx) = tokio::sync::mpsc::channel::<Message>(256);
+
+        let cap_task = tokio::spawn(async move {
+            if let Err(e) = cap.run(cap_tx).await {
+                warn!("capture exited: {e}");
+            }
+        });
+
+        info!("server: press Ctrl+Alt+Shift+G to toggle remote control");
+
+        // Drain capture events. Forward only when the grab flag is set
+        // (toggled by the hotkey in the hook callback).
+        loop {
+            tokio::select! {
+                msg = cap_rx.recv() => match msg {
+                    Some(msg) => {
+                        if grabbed.load(Ordering::Relaxed) {
+                            if let Err(e) = sink.send(msg).await {
+                                warn!("send to peer failed: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    None => break,
+                },
+                frame = source.next() => match frame {
+                    Some(Ok(_inbound)) => {
+                        // TODO: handle clipboard / pong / etc. from peer.
+                    }
+                    Some(Err(e)) => {
+                        warn!("read from peer failed: {e}");
+                        break;
+                    }
+                    None => {
+                        info!("peer disconnected");
+                        break;
+                    }
+                },
+            }
+        }
+
+        cap_task.abort();
+    } else {
+        let mut inj = dshare_input::default_inject()?;
+        info!("client: ready, injecting events from peer");
+
+        while let Some(frame) = source.next().await {
+            match frame {
+                Ok(msg) => {
+                    if let Err(e) = inj.handle(&msg).await {
+                        warn!("inject failed for {msg:?}: {e}");
+                    }
+                }
+                Err(e) => {
+                    warn!("decode error: {e}");
+                    break;
+                }
+            }
+        }
+    }
+
+    info!("peer session ended");
     Ok(())
 }
 

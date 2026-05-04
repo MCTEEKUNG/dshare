@@ -99,6 +99,10 @@ impl InputCapture for WinCapture {
     fn set_grabbed(&mut self, grabbed: bool) {
         self.grabbed.store(grabbed, Ordering::SeqCst);
     }
+
+    fn grabbed_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.grabbed)
+    }
 }
 
 fn hook_thread_main(
@@ -228,6 +232,9 @@ extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
 }
 
+/// VK_G — used by the toggle hotkey Ctrl+Alt+Shift+G.
+const HOTKEY_VK: u32 = 0x47;
+
 extern "system" fn kbd_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code != HC_ACTION as i32 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -237,7 +244,22 @@ extern "system" fn kbd_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> L
     let w = wparam.0 as u32;
 
     let pressed = matches!(w, WM_KEYDOWN | WM_SYSKEYDOWN);
-    let is_key = matches!(w, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP);
+    let released = matches!(w, WM_KEYUP | WM_SYSKEYUP);
+    let is_key = pressed || released;
+
+    // Hotkey: Ctrl+Alt+Shift+G toggles the grab flag and is swallowed.
+    if pressed && info.vkCode == HOTKEY_VK {
+        let m = read_current_modifiers();
+        if m.ctrl && m.alt && m.shift {
+            GRABBED.with(|g| {
+                if let Some(g) = g.borrow().as_ref() {
+                    let prev = g.fetch_xor(true, Ordering::SeqCst);
+                    tracing::info!("dshare grab {}", if prev { "OFF" } else { "ON" });
+                }
+            });
+            return LRESULT(1);
+        }
+    }
 
     if is_key {
         if let Some(evdev) = keycode::vk_to_evdev(info.vkCode) {
