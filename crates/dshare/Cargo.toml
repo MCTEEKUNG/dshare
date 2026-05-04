@@ -1,0 +1,24 @@
+[package]
+name = "dshare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dshare"
+path = "src/main.rs"
+
+[dependencies]
+dshare-protocol = { workspace = true }
+dshare-core = { workspace = true }
+dshare-input = { workspace = true }
+dshare-clipboard = { workspace = true }
+dshare-gui = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+uuid = { workspace = true }

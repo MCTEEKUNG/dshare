@@ -1,0 +1,19 @@
+[package]
+name = "dshare-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dshare-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { workspace = true }
