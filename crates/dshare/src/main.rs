@@ -37,6 +37,18 @@ enum Cmd {
     /// Drive the local inject backend with a canned sequence (smoke test).
     /// On Linux this exercises the uinput virtual device.
     TestInject,
+    /// Watch local input for a few seconds and print each event.
+    /// Does NOT grab — events still reach other applications normally.
+    TestCapture {
+        /// Seconds to observe before exiting.
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// After installing hooks, drive the inject backend to round-trip
+        /// a few synthetic events through the OS. Verifies the whole pipe
+        /// without needing human interaction.
+        #[arg(long)]
+        self_test: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -57,7 +69,70 @@ fn main() -> anyhow::Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(test_inject())
         }
+        Cmd::TestCapture { seconds, self_test } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(test_capture(seconds, self_test))
+        }
     }
+}
+
+/// Observe local input for `seconds` without blocking it. Useful to confirm
+/// the capture backend wires up. On Windows this exercises the low-level
+/// hook chain; on Linux it would go through evdev (not yet implemented).
+async fn test_capture(seconds: u64, self_test: bool) -> anyhow::Result<()> {
+    let mut cap = dshare_input::default_capture()?;
+    cap.set_grabbed(false);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(256);
+    let cap_task = tokio::spawn(async move {
+        if let Err(e) = cap.run(tx).await {
+            warn!("capture exited: {e}");
+        }
+    });
+
+    if self_test {
+        // Drive a balanced sequence: cursor returns to start, no net change.
+        let inject_task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let mut inj = match dshare_input::default_inject() {
+                Ok(i) => i,
+                Err(e) => {
+                    warn!("inject backend init failed: {e}");
+                    return;
+                }
+            };
+            for _ in 0..3 {
+                let _ = inj.handle(&Message::MouseMove { dx: 2, dy: 0 }).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ = inj.handle(&Message::MouseMove { dx: -2, dy: 0 }).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        // Don't await it — let the capture loop see events as they fire.
+        drop(inject_task);
+        info!("self-test: injecting 6 mouse moves through SendInput");
+    } else {
+        info!(
+            "observing input for {seconds}s (events not blocked) — press keys / move mouse"
+        );
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    let mut count = 0usize;
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Some(msg)) => {
+                count += 1;
+                info!("event #{count}: {msg:?}");
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    info!("test-capture done, {count} events seen");
+    cap_task.abort();
+    Ok(())
 }
 
 /// Canned input sequence: nudge cursor right, click, type three letters.

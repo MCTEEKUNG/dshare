@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod codec;
+pub mod keycode;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_PORT: u16 = 24800;
